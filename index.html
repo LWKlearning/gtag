@@ -1,72 +1,105 @@
 <!DOCTYPE html>
 <html>
 <head>
+    <meta charset="utf-8">
+    <title>Gorilla VR - Map & Multiplayer</title>
     <script src="https://aframe.io/releases/1.4.2/aframe.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/gh/c-frame/aframe-physics-system@v4.2.2/dist/aframe-physics-system.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/2.5.0/socket.io.slim.js"></script>
+    <script src="https://unpkg.com/networked-aframe@^0.12.0/dist/networked-aframe.min.js"></script>
+
     <script>
-AFRAME.registerComponent('monke-physics', {
-  init: function () {
-    this.vel = new THREE.Vector3();
-    this.lastHandPos = { l: new THREE.Vector3(), r: new THREE.Vector3() };
-    this.gravity = -0.01; 
-    this.bounce = 1.5;   // Adjust for "strength"
-    this.friction = 0.95; // Higher = less sliding
-  },
-  tick: function (t, dt) {
-    if (!dt) return;
-    const rig = this.el.object3D;
-    
-    // 1. Apply Gravity & Velocity
-    this.vel.y += this.gravity;
-    this.vel.multiplyScalar(this.friction);
-    rig.position.add(this.vel);
+        // GORILLA-STYLE LOCOMOTION SCRIPT
+        AFRAME.registerComponent('gorilla-locomotion', {
+            init: function () {
+                this.isGripping = false;
+                this.previousPosition = new THREE.Vector3();
+                this.rig = document.querySelector('#rig');
+                
+                // Detect grip (triggers or side buttons)
+                this.el.addEventListener('triggerdown', () => { this.isGripping = true; });
+                this.el.addEventListener('triggerup', () => { this.isGripping = false; });
+                this.el.addEventListener('gripdown', () => { this.isGripping = true; });
+                this.el.addEventListener('gripup', () => { this.isGripping = false; });
+            },
+            tick: function () {
+                let currentPosition = new THREE.Vector3();
+                this.el.object3D.getWorldPosition(currentPosition);
 
-    // Simple Floor Collision
-    if (rig.position.y < 0) { 
-        rig.position.y = 0; 
-        this.vel.y = 0; 
-    }
+                // If gripping and moving the hand, move the rig in the opposite direction
+                if (this.isGripping && this.previousPosition.length() > 0) {
+                    let deltaX = currentPosition.x - this.previousPosition.x;
+                    let deltaY = currentPosition.y - this.previousPosition.y;
+                    let deltaZ = currentPosition.z - this.previousPosition.z;
 
-    // 2. Hand Movement Logic
-    ['left', 'right'].forEach(side => {
-      const handEl = document.querySelector(`#${side}Hand`);
-      if (!handEl) return;
-      
-      const hand = handEl.object3D;
-      const curr = new THREE.Vector3();
-      // Use local position so rig movement doesn't interfere
-      curr.copy(hand.position); 
-      
-      const sideKey = side === 'left' ? 'l' : 'r';
-      const lastPos = this.lastHandPos[sideKey];
-      const dist = curr.distanceTo(lastPos);
-
-      // Trigger push if hand moves down/fast near the "ground"
-      // Adjust '0.5' to change how close to your feet you must hit
-      if (dist > 0.01 && (curr.y + rig.position.y) < 0.5) {
-         const delta = curr.clone().sub(lastPos);
-         
-         // Push rig in the OPPOSITE direction of the hand swing
-         this.vel.x -= delta.x * this.bounce;
-         this.vel.z -= delta.z * this.bounce;
-         this.vel.y -= delta.y * this.bounce;
-      }
-      this.lastHandPos[sideKey].copy(curr);
-    });
-  }
-});
-
+                    let rigPos = this.rig.getAttribute('position');
+                    
+                    // The 1.5 is the impulse strength. Adjust this to jump further/less.
+                    this.rig.setAttribute('position', {
+                        x: rigPos.x - (deltaX * 1.5),
+                        y: rigPos.y - (deltaY * 1.5),
+                        z: rigPos.z - (deltaZ * 1.5)
+                    });
+                }
+                this.previousPosition.copy(currentPosition);
+            }
+        });
     </script>
 </head>
 <body>
-    <a-scene webxr="referenceSpaceType: local-floor">
-        <a-entity id="rig" monke-physics>
-            <a-camera></a-camera>
-            <a-entity id="leftHand" oculus-touch-controls="hand: left"></a-entity>
-            <a-entity id="rightHand" oculus-touch-controls="hand: right"></a-entity>
+    <a-scene 
+        networked-scene="
+            serverURL: https://networked-aframe.glitch.me;
+            app: gorillaweb; 
+            room: forest; 
+            debug: false;" 
+        physics="gravity: -9.8" 
+        shadow="type: pcfsoft">
+
+        <a-assets>
+            <img id="tex-grass" src="https://raw.githubusercontent.com/aframevr/sample-assets/master/assets/images/terrain/grasslight-big.jpg" crossorigin="anonymous">
+            <img id="tex-wood" src="https://raw.githubusercontent.com/aframevr/sample-assets/master/assets/images/wood/wood.jpg" crossorigin="anonymous">
+            <img id="tex-stone" src="https://raw.githubusercontent.com/aframevr/sample-assets/master/assets/images/bricks/brick_bump.jpg" crossorigin="anonymous">
+            
+            <template id="avatar-template">
+                <a-entity>
+                    <a-sphere class="head" scale="0.25 0.25 0.25" color="#2b2b2b"></a-sphere>
+                </a-entity>
+            </template>
+            <template id="hand-template">
+                <a-entity>
+                    <a-box scale="0.1 0.1 0.15" color="#5c3a21"></a-box>
+                </a-entity>
+            </template>
+        </a-assets>
+
+        <a-entity id="rig" position="0 0 5">
+            <a-camera position="0 1.6 0" networked="template:#avatar-template;attachTemplateToLocal:false;" look-controls="pointerLockEnabled: false"></a-camera>
+            
+            <a-entity hand-controls="hand: left" gorilla-locomotion networked="template:#hand-template;attachTemplateToLocal:false;"></a-entity>
+            <a-entity hand-controls="hand: right" gorilla-locomotion networked="template:#hand-template;attachTemplateToLocal:false;"></a-entity>
         </a-entity>
+
+        <a-plane position="0 0 0" rotation="-90 0 0" width="40" height="40" src="#tex-grass" repeat="10 10" shadow="receive: true" static-body></a-plane>
         
-        <a-grid color="#444"></a-grid>
+        <a-plane position="0 10 -20" rotation="0 0 0" width="40" height="20" src="#tex-stone" repeat="4 2" static-body></a-plane>
+        <a-plane position="0 10 20" rotation="0 180 0" width="40" height="20" src="#tex-stone" repeat="4 2" static-body></a-plane>
+        <a-plane position="-20 10 0" rotation="0 90 0" width="40" height="20" src="#tex-stone" repeat="4 2" static-body></a-plane>
+        <a-plane position="20 10 0" rotation="0 -90 0" width="40" height="20" src="#tex-stone" repeat="4 2" static-body></a-plane>
+
+        <a-cylinder position="0 0 0" radius="1.5" height="15" src="#tex-wood" shadow="cast: true; receive: true" static-body></a-cylinder>
+        <a-cylinder position="2 3 0" rotation="0 0 -45" radius="0.4" height="6" src="#tex-wood" shadow="cast: true" static-body></a-cylinder>
+        <a-cylinder position="-1.5 6 2" rotation="45 0 45" radius="0.3" height="7" src="#tex-wood" shadow="cast: true" static-body></a-cylinder>
+        <a-cylinder position="0 9 -2" rotation="-30 0 0" radius="0.4" height="8" src="#tex-wood" shadow="cast: true" static-body></a-cylinder>
+
+        <a-box position="3 5 0" width="4" height="0.2" depth="4" color="#8b5a2b" static-body></a-box>
+        <a-box position="-3 8 3" width="3" height="0.2" depth="3" color="#8b5a2b" static-body></a-box>
+        <a-box position="-8 2 -8" rotation="20 45 0" width="2" height="6" depth="0.5" src="#tex-wood" static-body></a-box>
+
+        <a-light type="ambient" color="#bbeeff" intensity="0.4"></a-light>
+        <a-light type="directional" position="-10 20 10" color="#ffffff" intensity="0.8" shadow="cast: true; shadowMapWidth: 2048; shadowMapHeight: 2048"></a-light>
         <a-sky color="#87CEEB"></a-sky>
+
     </a-scene>
 </body>
 </html>
