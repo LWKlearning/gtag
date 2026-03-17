@@ -2,194 +2,151 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>Gorilla Locomotion WebXR</title>
+    <title>Gorilla Locomotion - Friction Fix</title>
     <script src="https://aframe.io/releases/1.4.2/aframe.min.js"></script>
 </head>
 <body style="background: #000; margin: 0;">
     <a-scene 
         webxr="referenceSpaceType: local; requiredFeatures: local-floor;" 
-        renderer="antialias: true; precision: mediump; sortObjects: true;"
+        renderer="antialias: true; precision: mediump;"
         device-orientation-permission-ui="enabled: false">
         
         <a-sky color="#050505"></a-sky>
+        
         <a-entity id="world">
             <a-grid color="#222" width="100" height="100"></a-grid>
-            <a-plane position="0 0 0" rotation="-90 0 0" width="100" height="100" color="#111" class="locomotion-enabled" data-slip="0.03"></a-plane>
-            <a-box position="0 1 -4" width="2" height="2" depth="2" color="#333" class="locomotion-enabled"></a-box>
-            <a-box position="-5 2 -6" width="4" height="6" depth="4" color="#222" class="locomotion-enabled"></a-box>
-            <a-box position="5 1.5 -3" width="1" height="3" depth="6" color="#333" class="locomotion-enabled"></a-box>
+            <a-plane position="0 0 0" rotation="-90 0 0" width="100" height="100" color="#111" class="locomotion-enabled"></a-plane>
+            <a-box position="-3 2 -5" width="1" height="4" depth="1" color="#f33" class="locomotion-enabled"></a-box>
+            <a-box position="3 2 -5" width="1" height="4" depth="1" color="#33f" class="locomotion-enabled"></a-box>
         </a-entity>
 
-        <a-entity id="player" gorilla-locomotion-system>
+        <a-entity id="player" gorilla-locomotion-v2>
             <a-entity id="head" camera position="0 1.6 0" look-controls></a-entity>
-            
             <a-entity id="leftHand" oculus-touch-controls="hand: left"></a-entity>
             <a-entity id="rightHand" oculus-touch-controls="hand: right"></a-entity>
-
-            <a-sphere id="leftFollower" radius="0.06" color="#ff0000"></a-sphere>
-            <a-sphere id="rightFollower" radius="0.06" color="#0000ff"></a-sphere>
+            
+            <a-sphere id="lFollow" radius="0.06" color="#f00"></a-sphere>
+            <a-sphere id="rFollow" radius="0.06" color="#00f"></a-sphere>
         </a-entity>
     </a-scene>
 
 <script>
-AFRAME.registerComponent('gorilla-locomotion-system', {
+AFRAME.registerComponent('gorilla-locomotion-v2', {
     init: function () {
-        // --- 1:1 Configuration ---
         this.config = {
-            velocityHistorySize: 10,
-            maxArmLength: 1.5,
-            unStickDistance: 1.0,
-            velocityLimit: 0.01,
-            maxJumpSpeed: 15.0,
-            jumpMultiplier: 1.3, // Slightly boosted for WebXR feel
-            minRayDist: 0.05,
-            defaultSlide: 0.03,
-            precision: 0.995,
-            gravity: -9.81 * 2
+            vHistSize: 10,
+            maxArm: 1.5,
+            jumpMult: 1.4, // Boosted for forward momentum
+            friction: 0.1, // How fast you stop sliding (0 = ice, 1 = instant stop)
+            gravity: -19.6, // 2f * 9.8f
+            minRay: 0.05,
+            voidY: -10 
         };
 
-        // --- References ---
         this.rig = this.el.object3D;
         this.head = document.querySelector('#head').object3D;
-        this.leftHand = document.querySelector('#leftHand').object3D;
-        this.rightHand = document.querySelector('#rightHand').object3D;
-        this.leftFollower = document.querySelector('#leftFollower').object3D;
-        this.rightFollower = document.querySelector('#rightFollower').object3D;
+        this.hands = {
+            left: { tr: document.querySelector('#leftHand').object3D, fol: document.querySelector('#lFollow').object3D, last: new THREE.Vector3(), touching: false },
+            right: { tr: document.querySelector('#rightHand').object3D, fol: document.querySelector('#rFollow').object3D, last: new THREE.Vector3(), touching: false }
+        };
 
-        // --- State ---
-        this.lastLeftPos = new THREE.Vector3();
-        this.lastRightPos = new THREE.Vector3();
-        this.lastHeadPos = new THREE.Vector3();
+        this.playerVel = new THREE.Vector3();
+        this.vHist = new Array(this.config.vHistSize).fill(null).map(() => new THREE.Vector3());
+        this.vIdx = 0;
         this.lastRigPos = new THREE.Vector3().copy(this.rig.position);
-        
-        this.wasLeftTouching = false;
-        this.wasRightTouching = false;
-        
-        this.playerVelocity = new THREE.Vector3(0, 0, 0);
-        this.velocityHistory = new Array(this.config.velocityHistorySize).fill(null).map(() => new THREE.Vector3());
-        this.velocityIndex = 0;
-        this.denormalizedVelAvg = new THREE.Vector3();
-
-        // --- Math Helpers (Reusable to prevent GC spikes) ---
         this.raycaster = new THREE.Raycaster();
-        this.tempVec1 = new THREE.Vector3();
-        this.tempVec2 = new THREE.Vector3();
-        this.tempVec3 = new THREE.Vector3();
         this.collidables = [];
-        
-        // Cache collidables
         this.updateCollidables();
     },
 
     updateCollidables: function() {
-        const els = document.querySelectorAll('.locomotion-enabled');
-        this.collidables = Array.from(els).map(el => el.getObject3D('mesh')).filter(m => m);
+        this.collidables = Array.from(document.querySelectorAll('.locomotion-enabled')).map(el => el.getObject3D('mesh')).filter(m => m);
     },
 
-    getHandWorldPos: function(hand, outVec) {
-        hand.getWorldPosition(outVec);
-        this.head.getWorldPosition(this.tempVec1);
-        
-        const dist = outVec.distanceTo(this.tempVec1);
-        if (dist > this.config.maxArmLength) {
-            outVec.sub(this.tempVec1).normalize().multiplyScalar(this.config.maxArmLength).add(this.tempVec1);
+    getHandPos: function(hTr, out) {
+        hTr.getWorldPosition(out);
+        let headPos = new THREE.Vector3();
+        this.head.getWorldPosition(headPos);
+        if (out.distanceTo(headPos) > this.config.maxArm) {
+            out.sub(headPos).normalize().multiplyScalar(this.config.maxArm).add(headPos);
         }
     },
 
-    tick: function (time, dt) {
-        if (dt <= 0 || isNaN(dt)) return;
-        const deltaSec = dt / 1000;
+    tick: function (t, dt) {
+        if (!dt || dt > 100) return; // Ignore lag spikes
+        const ds = dt / 1000;
 
-        // 1. Apply Physics Rigidbody Velocity
-        this.playerVelocity.y += this.config.gravity * deltaSec;
-        this.tempVec1.copy(this.playerVelocity).multiplyScalar(deltaSec);
-        this.rig.position.add(this.tempVec1);
-
-        let leftHit = false, rightHit = false;
-        let movement = this.tempVec2.set(0, 0, 0);
-        let leftIter = this.tempVec3.set(0, 0, 0);
-
-        // 2. Left Hand Pass
-        const currentLeft = new THREE.Vector3();
-        this.getHandWorldPos(this.leftHand, currentLeft);
-        
-        const gravBuffer = new THREE.Vector3(0, -19.6 * deltaSec * deltaSec, 0);
-        const distL = currentLeft.clone().sub(this.lastLeftPos).add(gravBuffer);
-
-        const resL = this.iterativeSphereCast(this.lastLeftPos, this.config.minRayDist, distL, true);
-        if (resL.hit) {
-            leftIter.copy(this.wasLeftTouching ? this.lastLeftPos.clone().sub(currentLeft) : resL.pos.clone().sub(currentLeft));
-            this.playerVelocity.set(0, 0, 0);
-            leftHit = true;
+        // 1. VOID RESET
+        if (this.rig.position.y < this.config.voidY) {
+            this.rig.position.set(0, 2, 0);
+            this.playerVel.set(0, 0, 0);
         }
 
-        // 3. Right Hand Pass
-        const currentRight = new THREE.Vector3();
-        this.getHandWorldPos(this.rightHand, currentRight);
-        const distR = currentRight.clone().sub(this.lastRightPos).add(gravBuffer);
+        // 2. APPLY PHYSICS & FRICTION
+        this.playerVel.y += this.config.gravity * ds;
+        
+        // Horizontal Friction (The Slide Fix)
+        if (this.hands.left.touching || this.hands.right.touching) {
+            this.playerVel.x *= (1 - this.config.friction);
+            this.playerVel.z *= (1 - this.config.friction);
+        }
 
-        const resR = this.iterativeSphereCast(this.lastRightPos, this.config.minRayDist, distR, true);
-        if (resR.hit) {
-            const rightIter = this.wasRightTouching ? this.lastRightPos.clone().sub(currentRight) : resR.pos.clone().sub(currentRight);
-            this.playerVelocity.set(0, 0, 0);
-            rightHit = true;
+        this.rig.position.add(this.playerVel.clone().multiplyScalar(ds));
+
+        let moveTotal = new THREE.Vector3();
+        let hitAny = false;
+
+        // 3. HAND ITERATION
+        ['left', 'right'].forEach(side => {
+            let h = this.hands[side];
+            let curr = new THREE.Vector3();
+            this.getHandPos(h.tr, curr);
             
-            // Average if both touching
-            if (leftHit || this.wasLeftTouching) movement.add(leftIter).add(rightIter).multiplyScalar(0.5);
-            else movement.copy(rightIter);
-        } else if (leftHit) {
-            movement.copy(leftIter);
-        }
+            // The "Sticky" Buffer: check movement + small downward bias
+            let dist = curr.clone().sub(h.last).add(new THREE.Vector3(0, -0.01, 0));
+            
+            this.raycaster.set(h.last, dist.clone().normalize());
+            this.raycaster.far = dist.length() + this.config.minRay;
+            let hits = this.raycaster.intersectObjects(this.collidables, true);
 
-        // 4. Apply Final Movement & Head Safety
-        if (movement.lengthSq() > 0) {
-            this.rig.position.add(movement);
-        }
+            if (hits.length > 0) {
+                let hit = hits[0];
+                let finalPos = hit.point.clone().add(hit.face.normal.clone().multiplyScalar(this.config.minRay));
+                
+                // Calculate PUSH force (Inverse of hand movement)
+                let push = h.touching ? h.last.clone().sub(curr) : finalPos.clone().sub(curr);
+                moveTotal.add(push);
+                
+                h.last.copy(finalPos);
+                h.touching = true;
+                hitAny = true;
+                this.playerVel.y = Math.max(0, this.playerVel.y); // Stop falling through floors
+            } else {
+                h.last.copy(curr);
+                h.touching = false;
+            }
+            h.fol.position.copy(h.last);
+        });
 
-        // Update Followers
-        this.lastLeftPos.copy(leftHit ? resL.pos : currentLeft);
-        this.lastRightPos.copy(rightHit ? resR.pos : currentRight);
-        this.leftFollower.position.copy(this.lastLeftPos);
-        this.rightFollower.position.copy(this.lastRightPos);
+        // 4. APPLY MOVE & JUMP
+        if (hitAny) {
+            this.rig.position.add(moveTotal);
+            
+            // Calculate Momentum from Rig movement
+            let instantVel = this.rig.position.clone().sub(this.lastRigPos).divideScalar(ds);
+            this.vHist[this.vIdx].copy(instantVel);
+            this.vIdx = (this.vIdx + 1) % this.config.vHistSize;
 
-        // 5. Store Velocity for Jumping
-        this.storeVelocity(deltaSec);
+            let avg = new THREE.Vector3();
+            this.vHist.forEach(v => avg.add(v));
+            avg.divideScalar(this.config.vHistSize);
 
-        if ((leftHit || rightHit)) {
-            if (this.denormalizedVelAvg.length() > this.config.velocityLimit) {
-                this.playerVelocity.copy(this.denormalizedVelAvg).multiplyScalar(this.config.jumpMultiplier);
-                if (this.playerVelocity.length() > this.config.maxJumpSpeed) {
-                    this.playerVelocity.normalize().multiplyScalar(this.config.maxJumpSpeed);
-                }
+            // Trigger Jump on "Flick"
+            if (avg.length() > 0.1) {
+                this.playerVel.copy(avg).multiplyScalar(this.config.jumpMult);
             }
         }
 
-        this.wasLeftTouching = leftHit;
-        this.wasRightTouching = rightHit;
-    },
-
-    iterativeSphereCast: function(start, radius, move, single) {
-        this.raycaster.set(start, move.clone().normalize());
-        this.raycaster.far = move.length() + radius;
-        const hits = this.raycaster.intersectObjects(this.collidables, true);
-
-        if (hits.length > 0) {
-            const hit = hits[0];
-            const pos = hit.point.clone().add(hit.face.normal.clone().multiplyScalar(radius));
-            return { hit: true, pos: pos };
-        }
-        return { hit: false, pos: start.clone().add(move) };
-    },
-
-    storeVelocity: function(dt) {
-        this.velocityIndex = (this.velocityIndex + 1) % this.config.velocityHistorySize;
-        const currentVel = this.tempVec1.subVectors(this.rig.position, this.lastRigPos).divideScalar(dt);
-        
-        this.velocityHistory[this.velocityIndex].copy(currentVel);
-        this.denormalizedVelAvg.set(0,0,0);
-        this.velocityHistory.forEach(v => this.denormalizedVelAvg.add(v));
-        this.denormalizedVelAvg.divideScalar(this.config.velocityHistorySize);
-        
         this.lastRigPos.copy(this.rig.position);
     }
 });
