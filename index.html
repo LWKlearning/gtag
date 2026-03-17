@@ -3,43 +3,58 @@
 <head>
     <script src="https://aframe.io/releases/1.4.2/aframe.min.js"></script>
     <script>
-    AFRAME.registerComponent('monke-physics', {
-      init: function () {
-        this.vel = new THREE.Vector3();
-        this.lastHandPos = { l: new THREE.Vector3(), r: new THREE.Vector3() };
-        this.gravity = -0.015;
-        this.bounce = 1.7; // The "flick" multiplier
-        this.friction = 0.97;
-      },
-      tick: function (t, dt) {
-        if (!dt) return;
-        const rig = this.el.object3D;
-        
-        // 1. Physics Loop
-        this.vel.y += this.gravity;
-        this.vel.multiplyScalar(this.friction);
-        rig.position.add(this.vel);
-        if (rig.position.y < 0) { rig.position.y = 0; this.vel.y = 0; }
+AFRAME.registerComponent('monke-physics', {
+  init: function () {
+    this.vel = new THREE.Vector3();
+    this.lastHandPos = { l: new THREE.Vector3(), r: new THREE.Vector3() };
+    this.gravity = -0.01; 
+    this.bounce = 1.5;   // Adjust for "strength"
+    this.friction = 0.95; // Higher = less sliding
+  },
+  tick: function (t, dt) {
+    if (!dt) return;
+    const rig = this.el.object3D;
+    
+    // 1. Apply Gravity & Velocity
+    this.vel.y += this.gravity;
+    this.vel.multiplyScalar(this.friction);
+    rig.position.add(this.vel);
 
-        // 2. Hand Check
-        ['left', 'right'].forEach(side => {
-          const hand = document.querySelector(`#${side}Hand`).object3D;
-          const curr = new THREE.Vector3();
-          hand.getWorldPosition(curr);
-          
-          const dist = curr.distanceTo(this.lastHandPos[side === 'left' ? 'l' : 'r']);
-          // If hand moved fast and is near 'ground'
-          if (dist > 0.02 && curr.y - rig.position.y < 0.2) {
-             const delta = curr.clone().sub(this.lastHandPos[side === 'left' ? 'l' : 'r']);
-             // Reflection: Push rig opposite of hand movement
-             this.vel.x -= delta.x * this.bounce;
-             this.vel.z -= delta.z * this.bounce;
-             this.vel.y -= delta.y * this.bounce;
-          }
-          this.lastHandPos[side === 'left' ? 'l' : 'r'].copy(curr);
-        });
+    // Simple Floor Collision
+    if (rig.position.y < 0) { 
+        rig.position.y = 0; 
+        this.vel.y = 0; 
+    }
+
+    // 2. Hand Movement Logic
+    ['left', 'right'].forEach(side => {
+      const handEl = document.querySelector(`#${side}Hand`);
+      if (!handEl) return;
+      
+      const hand = handEl.object3D;
+      const curr = new THREE.Vector3();
+      // Use local position so rig movement doesn't interfere
+      curr.copy(hand.position); 
+      
+      const sideKey = side === 'left' ? 'l' : 'r';
+      const lastPos = this.lastHandPos[sideKey];
+      const dist = curr.distanceTo(lastPos);
+
+      // Trigger push if hand moves down/fast near the "ground"
+      // Adjust '0.5' to change how close to your feet you must hit
+      if (dist > 0.01 && (curr.y + rig.position.y) < 0.5) {
+         const delta = curr.clone().sub(lastPos);
+         
+         // Push rig in the OPPOSITE direction of the hand swing
+         this.vel.x -= delta.x * this.bounce;
+         this.vel.z -= delta.z * this.bounce;
+         this.vel.y -= delta.y * this.bounce;
       }
+      this.lastHandPos[sideKey].copy(curr);
     });
+  }
+});
+
     </script>
 </head>
 <body>
